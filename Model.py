@@ -17,7 +17,7 @@ class Model:
         self.dataset_of_point[predictor.name] = predictor
 
     def fit_OLS(self, dependent_variable: pandas.Series, use80forEducation=False, full_output=False,
-                batch_size: int = 1) -> pandas.Series:
+                batch_size: int = 1, momentum: float = None, optimizer: str = "sgd") -> pandas.Series:
         self.dataset_of_point["DEPENDENT"] = dependent_variable
         self._education80Percent = use80forEducation
 
@@ -25,9 +25,23 @@ class Model:
         if self._education80Percent:
             dataset_for_education = dataset_for_education.iloc[:int(len(dataset_for_education) * 0.8)]
 
-        self.parameters = (lambda bt: bt.set_full_output() if full_output else bt)(
-            BackTrace(self.parameters, dataset_for_education, batch_size=batch_size).set_piecewise_constant(
-                0.01)).set_momentum(0.8).set_regularization("elastic").start_back_trace()
+        # Базовый BackTrace
+        bt = BackTrace(
+            self.parameters, dataset_for_education, batch_size=batch_size, optimizer=optimizer,
+            momentum=momentum if momentum is not None else 0.0
+        ).set_piecewise_constant(0.01)
+
+        if full_output:
+            bt = bt.set_full_output()
+
+        # Включаем momentum только если задан флаг
+        if optimizer == "momentum" and momentum is not None:
+            bt = bt.set_momentum(momentum)
+
+        # (по желанию) регуляризация
+        bt = bt.set_regularization("elastic")
+
+        self.parameters = bt.start_back_trace()
 
         return self.parameters
 
