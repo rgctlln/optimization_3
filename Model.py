@@ -1,4 +1,5 @@
 import pandas
+import statsmodels.api as sm
 
 from BackTrace import BackTrace
 
@@ -56,10 +57,36 @@ class Model:
         MSE = ((y_pred - y_real) ** 2).mean()
         MAE = (y_pred - y_real).abs().mean()
 
-        metrics = {
-            "MSE": [MSE],
-            "MAE": [MAE]
-        }
+        # === 2) OLS через statsmodels ===
+        df = self.dataset_of_point.copy()
+        if self._education80Percent:
+            n_train = int(len(df) * 0.8)
+            train = df.iloc[:n_train]
+            test = df.iloc[n_train:]
+        else:
+            train = df
+            test = df
+
+        X_train = sm.add_constant(train.drop(columns="DEPENDENT"))
+        y_train = train["DEPENDENT"]
+        ols = sm.OLS(y_train, X_train).fit()
+
+        X_test = sm.add_constant(test.drop(columns="DEPENDENT"))
+        y_pred_sm = ols.predict(X_test)
+        y_real_sm = test["DEPENDENT"]
+
+        mse_sm = ((y_pred_sm - y_real_sm) ** 2).mean()
+        mae_sm = (y_pred_sm - y_real_sm).abs().mean()
+
+        metrics = pandas.DataFrame({
+            "MSE": [MSE, mse_sm],
+            "MAE": [MAE, mae_sm]
+        }, index=["BackTrace", "Statsmodels"])
+        #
+        # metrics = {
+        #     "MSE": [MSE],
+        #     "MAE": [MAE]
+        # }
 
         df_metrics = pandas.DataFrame(metrics)
         return df_metrics
