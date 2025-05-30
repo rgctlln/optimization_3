@@ -145,12 +145,31 @@ class BackTrace:
 
         prev_parameters = self.parameters.copy()
         prev_MSE = 99999999999
+        self.prev_loss = float("inf")
+        self.patience_counter = 0
+
+        self.points = self.points.copy()
+        for col in self.points.columns:
+            if col != "DEPENDENT":
+                self.points[col] = (self.points[col] - self.points[col].mean()) / self.points[col].std()
+
         for i in range(0, 100000):
             self.cnt_iterations += 1
 
             batch = self.points.sample(n=self.batch_size, replace=False)
 
-            grad_const, grad_parameters = self._cnt_sum_of_loose_function(batch)
+            try:
+                grad_const, grad_parameters = self._cnt_sum_of_loose_function(batch)
+            except Exception as e:
+                break
+            # Нормализация градиента параметров
+            grad_norm = np.linalg.norm(grad_parameters)
+            if grad_norm > 1.0:
+                grad_parameters = grad_parameters * (1.0 / grad_norm)
+
+            # Ограничение градиента свободного члена
+            if abs(grad_const) > 1.0:
+                grad_const = grad_const / abs(grad_const)
 
             for param in self.parameters.index:
                 if param == "const":
@@ -173,13 +192,19 @@ class BackTrace:
                 self.history.append(row)
 
             # stop
-            if (self.parameters - prev_parameters).abs().sum() < epsilon:
+            if (self.parameters - prev_parameters).abs().sum() < 1e-4:
+                print("Вышли, потому что параметры не меняются")
                 break
 
-            if self._cnt_MSE() < 1e-9:
+            if self._cnt_MSE() < 1e-6:
+                print("Вышли, потому что ошибка наименьшая")
+                break
+
+            if np.linalg.norm(grad_parameters) < 1e-4:
                 break
 
             if abs(prev_MSE - self._cnt_MSE()) < epsilon:
+                print("Вышли, потому что ошибка не меняется")
                 break
 
             prev_parameters = self.parameters.copy()
@@ -254,30 +279,49 @@ class BackTrace:
         print(f"Общая использованная память: {total_memory / 1024 / 1024:.2f} MB")
 
         print("[ Top 10 потребителей памяти ]")
-        for stat in top_stats[:10]: # TODO на удаление
+        for stat in top_stats[:10]:  # TODO на удаление
             print(stat)
         print("=================")
 
     def _cnt_sum_of_loose_function(self, batch: pandas.DataFrame) -> (pandas.Series, pandas.Series):
         all_mistakes = self._cnt_all_point_mistakes(batch)
+
+
+        loss = (all_mistakes ** 2).mean()
+        # Условие ранней остановки
+        if abs(self.prev_loss - loss) < 1e-6:
+            self.patience_counter += 1
+            if self.patience_counter >= 10:
+                print(f"🟡 Loss стабилизировался: {loss:.6f}")
+                raise Exception()
+        else:
+            self.patience_counter = 0
+
+        self.prev_loss = loss
+
         grad_parameters = (2 / (len(batch))) * batch.drop(columns='DEPENDENT').transpose().dot(all_mistakes)
         grad_const = (2 / (len(batch))) * all_mistakes.sum()
         return grad_const, grad_parameters
 
     def _cnt_all_point_mistakes(self, batch: pandas.DataFrame) -> pandas.Series:
         all_mistakes = []
-        for _, point in batch.iterrows():
-            y_pred = self.parameters["const"]
-            y_real = point["DEPENDENT"]
-
-            for name, value in point.items():
-                if name != "DEPENDENT":
-                    y_pred += value * self.parameters[name]
-
-            mistake = y_pred - y_real
-
-            all_mistakes.append(mistake)
-        return pandas.Series(all_mistakes, index=batch.index)
+        # for _, point in batch.iterrows():
+        #     y_pred = self.parameters["const"]
+        #     y_real = point["DEPENDENT"]
+        #
+        #     for name, value in point.items():
+        #         if name != "DEPENDENT":
+        #             y_pred += value * self.parameters[name]
+        #
+        #     mistake = y_pred - y_real
+        #
+        #     all_mistakes.append(mistake)
+        # return pandas.Series(all_mistakes, index=batch.index)
+        X = batch.drop(columns="DEPENDENT")
+        y_real = batch["DEPENDENT"]
+        y_pred = self.parameters["const"] + X.dot(self.parameters.drop("const"))
+        mistakes = y_pred - y_real
+        return mistakes
 
     def _cnt_MSE(self) -> float:
         X = self.points.drop(columns="DEPENDENT")
