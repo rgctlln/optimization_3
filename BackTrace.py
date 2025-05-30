@@ -180,7 +180,7 @@ class BackTrace:
         self.points['DEPENDENT'] = (self.points['DEPENDENT'] - self.y_mean) / self.y_std
 
 
-        for i in range(0, 100000):
+        for i in range(0, 10000):
             self.cnt_iterations += 1
 
             batch = self.points.sample(n=self.batch_size, replace=False)
@@ -261,10 +261,16 @@ class BackTrace:
                 history_last_norma = -1
                 print("Мы обнаружили зацикливание")
                 if self.choose_step_mode == "constant":
-                    self.print_history()
-
-                    raise Exception(
-                        f"A short circuit has been detected, and the constant step mode does not allow changing the step. Run the method again, but reduce the step. Current step: {self.step}")
+                    # self.print_history()
+                    print(
+                        "\033[31m" 
+                        f"A short circuit has been detected, and the constant step mode does not allow changing the step. "
+                        f"Run the method again, but reduce the step. Current step: {self.step}"
+                        "\033[0m"
+                    )
+                    break
+                    # raise Exception(
+                    #     f"A short circuit has been detected, and the constant step mode does not allow changing the step. Run the method again, but reduce the step. Current step: {self.step}")
                 elif self.choose_step_mode == "piecewise_constant":
                     self.step /= 2
                 elif self.choose_step_mode == "exponential_decay":
@@ -275,10 +281,16 @@ class BackTrace:
                         f"A short circuit has been detected")
 
         else:
-            self.print_history()
+            # self.print_history()
             print(self.parameters)
-            raise Exception(
-                f"Protection has been activated. More than {self.cnt_iterations} iterations have been done.")
+            print(
+                "\033[31m"  
+                f"Protection has been activated. More than {self.cnt_iterations} iterations have been done."
+                "\033[0m"
+            )
+
+            # raise Exception(
+            #     f"Protection has been activated. More than {self.cnt_iterations} iterations have been done.")
 
         self.print_history()
         end_time = time.time()
