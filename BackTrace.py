@@ -1,6 +1,5 @@
-import math
-import random
 import time
+import tracemalloc
 
 import numpy as np
 import pandas
@@ -26,7 +25,7 @@ def required_step_defined(method):
 
 class BackTrace:
 
-    def __init__(self, parameters: pandas.Series, points: pandas.DataFrame):
+    def __init__(self, parameters: pandas.Series, points: pandas.DataFrame, batch_size: int = 1):
         self.start_step = None
         self.step = None  # требуется вызов установки шага
 
@@ -45,6 +44,7 @@ class BackTrace:
 
         self.dichotomy_range = None
 
+        self.batch_size = batch_size
         return
 
     def set_full_output(self):
@@ -131,24 +131,34 @@ class BackTrace:
         Запуск градиентного спуска
         :return:
         """
+        tracemalloc.start()
         start_time = time.time()
         epsilon = 1e-6
         history_last_norma = -1
         cnt_history_last_norma = 0
         self.history = []
 
-        for i in range(0, 10000):
+        self.parameters = self.parameters.astype(float)
+
+        if self.batch_size > len(self.points):
+            raise Exception("The size of the batch exceeds the entire dataset. Reduce it!")
+
+        prev_parameters = self.parameters.copy()
+        prev_MSE = 99999999999
+        for i in range(0, 100000):
             self.cnt_iterations += 1
 
-            H_grad = self.cnt_sum_of_loose_function() / len(self.points)
+            batch = self.points.sample(n=self.batch_size, replace=False)
 
-            H_grad = H_grad + 0 #TODO задел на lambda*R(w)
+            grad_const, grad_parameters = self._cnt_sum_of_loose_function(batch)
 
-            H_grad.rename(index={"DEPENDENT": "const"}, inplace=True)
+            for param in self.parameters.index:
+                if param == "const":
+                    self.parameters[param] -= self.step * grad_const
+                else:
+                    self.parameters[param] -= self.step * grad_parameters[param]
 
-            self.parameters: pandas.Series = self.parameters - self.step * H_grad
-
-            new_norma = H_grad.dot(H_grad) ** 0.5
+            new_norma = grad_parameters.dot(grad_parameters) ** 0.5
             if self.full_output:
                 row = {
                     "Iteration": self.cnt_iterations,
@@ -163,10 +173,17 @@ class BackTrace:
                 self.history.append(row)
 
             # stop
-            if new_norma ** 2 < epsilon:
-                self.print_history()
+            if (self.parameters - prev_parameters).abs().sum() < epsilon:
                 break
 
+            if self._cnt_MSE() < 1e-9:
+                break
+
+            if abs(prev_MSE - self._cnt_MSE()) < epsilon:
+                break
+
+            prev_parameters = self.parameters.copy()
+            prev_MSE = self._cnt_MSE()
             if self.choose_step_mode == "exponential_decay":
                 self.step = self.start_step * np.exp((-self.exponential_decay) * self.cnt_iterations)
             elif self.choose_step_mode == "polynomial_decay":
@@ -185,6 +202,7 @@ class BackTrace:
                 print("Мы обнаружили зацикливание")
                 if self.choose_step_mode == "constant":
                     self.print_history()
+
                     raise Exception(
                         f"A short circuit has been detected, and the constant step mode does not allow changing the step. Run the method again, but reduce the step. Current step: {self.step}")
                 elif self.choose_step_mode == "piecewise_constant":
@@ -198,56 +216,71 @@ class BackTrace:
 
         else:
             self.print_history()
+            print(self.parameters)
             raise Exception(
                 f"Protection has been activated. More than {self.cnt_iterations} iterations have been done.")
 
         self.print_history()
         end_time = time.time()
-        # self.print_results(symbols_dict, start_time, end_time)
+        self.print_results(start_time, end_time)
         return self.parameters
 
     def print_history(self):
         if self.full_output:
             df = pandas.DataFrame(self.history)
-            # df = df.round(2)
             display(df)
 
-    def print_results(self, symbols_dict, start_time, end_time):
+    def print_results(self, start_time, end_time):
         """
         Вывод результатов
 
         :param end_time: время конца запуска алгоритма
         :param start_time : время начала запуска алгоритма
-        :param symbols_dict: словарь из значений переменных
         :return:
         """
-        print(f"Расчёт минимума закончен. Был использован {self.choose_step_mode} шаг")
-        print(f"Функция: {self.func}")
+        print(f"Расчёт параметра закончен. Был использован {self.choose_step_mode} шаг")
         print(f"Время выполнения: {end_time - start_time} секунд")
+        print(f"С размером Батча: {self.batch_size} строк")
         print(f"Использованное количество итераций: {self.cnt_iterations}")
-        print(symbols_dict)  # todo remove
-        for sym, value in symbols_dict.items():
+        for sym, value in self.parameters.items():
             try:
                 print(f"{sym}: {round(value, 10)}")
             except ZeroDivisionError as ex:
                 print(f"{sym}: {0}")
-        print(f"Минимальное значение функции: {self.func.evaluate(symbols_dict)}")
+        snapshot = tracemalloc.take_snapshot()
+        top_stats = snapshot.statistics('lineno')
+
+        total_memory = sum(stat.size for stat in top_stats)
+        print(f"Общая использованная память: {total_memory / 1024 / 1024:.2f} MB")
+
+        print("[ Top 10 потребителей памяти ]")
+        for stat in top_stats[:10]: # TODO на удаление
+            print(stat)
         print("=================")
 
-    def cnt_sum_of_loose_function(self) -> pandas.Series:
+    def _cnt_sum_of_loose_function(self, batch: pandas.DataFrame) -> (pandas.Series, pandas.Series):
+        all_mistakes = self._cnt_all_point_mistakes(batch)
+        grad_parameters = (2 / (len(batch))) * batch.drop(columns='DEPENDENT').transpose().dot(all_mistakes)
+        grad_const = (2 / (len(batch))) * all_mistakes.sum()
+        return grad_const, grad_parameters
 
-        random_row = random.choice(list(self.points.iterrows()))
-        _, point = random_row
+    def _cnt_all_point_mistakes(self, batch: pandas.DataFrame) -> pandas.Series:
+        all_mistakes = []
+        for _, point in batch.iterrows():
+            y_pred = self.parameters["const"]
+            y_real = point["DEPENDENT"]
 
-        y_pred = self.parameters["const"]
+            for name, value in point.items():
+                if name != "DEPENDENT":
+                    y_pred += value * self.parameters[name]
 
-        y_real = point["DEPENDENT"]
+            mistake = y_pred - y_real
 
-        point["DEPENDENT"] = 1
+            all_mistakes.append(mistake)
+        return pandas.Series(all_mistakes, index=batch.index)
 
-        for name, value in point.items():
-            if name != "DEPENDENT":
-                y_pred += value * self.parameters[name]
-        sum_loose_func = 2 * (y_pred - y_real) * point
-
-        return sum_loose_func
+    def _cnt_MSE(self) -> float:
+        X = self.points.drop(columns="DEPENDENT")
+        y = self.points["DEPENDENT"]
+        pred = self.parameters["const"] + X.dot(self.parameters.drop("const"))
+        return ((pred - y) ** 2).mean()

@@ -1,0 +1,6 @@
+pandas~=2.2.3
+numpy~=2.2.6
+sympy~=1.14.0
+scipy~=1.15.3
+ipython~=9.2.0
+statsmodels~=0.14.4
