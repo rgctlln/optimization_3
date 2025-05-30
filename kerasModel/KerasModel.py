@@ -10,7 +10,8 @@ from sklearn.metrics import mean_squared_error
 class KerasLinearModel:
     def __init__(self, input_dim):
         self.model = keras.Sequential([
-            layers.Dense(1, input_shape=(input_dim,))
+            keras.Input(shape=(input_dim,)),
+            layers.Dense(1)
         ])
 
     def compile(self, optimizer):
@@ -21,7 +22,7 @@ class KerasLinearModel:
 
     def evaluate(self, x_test, y_test):
         pred = self.model.predict(x_test, verbose=0).ravel()
-        mse = mean_squared_error(y_test, pred)
+        mse = mean_squared_error(y_test.numpy(), pred)
         return mse, pred
 
     def train_keras(opt_name, xtr, ytr, xte, yte, lr_dict):
