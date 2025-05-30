@@ -26,7 +26,7 @@ class Model:
 
         self.parameters = (lambda bt: bt.set_full_output() if full_output else bt)(
             BackTrace(self.parameters, dataset_for_education, batch_size=batch_size).set_piecewise_constant(
-                0.01)).start_back_trace()
+                0.001)).start_back_trace()
 
         return self.parameters
 

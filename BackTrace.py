@@ -147,11 +147,38 @@ class BackTrace:
         prev_MSE = 99999999999
         self.prev_loss = float("inf")
         self.patience_counter = 0
+        self.cnt_parameters_repeat = 0
+        # self.points = self.points.copy()
+        # for col in self.points.columns:
+        #     # if col != "DEPENDENT":
+        #     self.points[col] = (self.points[col] - self.points[col].mean()) / self.points[col].std()
 
         self.points = self.points.copy()
+
+        # # нормируем признаки
+        # for col in self.points.columns:
+        #     if col != "DEPENDENT":
+        #         self.points[col] = (self.points[col] - self.points[col].mean()) / self.points[col].std()
+        #
+        # # нормируем целевую переменную
+        # y_mean = self.points['DEPENDENT'].mean()
+        # y_std = self.points['DEPENDENT'].std()
+        # self.points['DEPENDENT'] = (self.points['DEPENDENT'] - y_mean) / y_std
+
+        self.x_means = {}
+        self.x_stds = {}
         for col in self.points.columns:
             if col != "DEPENDENT":
-                self.points[col] = (self.points[col] - self.points[col].mean()) / self.points[col].std()
+                mean = self.points[col].mean()
+                std = self.points[col].std()
+                self.x_means[col] = mean
+                self.x_stds[col] = std
+                self.points[col] = (self.points[col] - mean) / std
+
+        self.y_mean = self.points['DEPENDENT'].mean()
+        self.y_std = self.points['DEPENDENT'].std()
+        self.points['DEPENDENT'] = (self.points['DEPENDENT'] - self.y_mean) / self.y_std
+
 
         for i in range(0, 100000):
             self.cnt_iterations += 1
@@ -162,14 +189,19 @@ class BackTrace:
                 grad_const, grad_parameters = self._cnt_sum_of_loose_function(batch)
             except Exception as e:
                 break
-            # Нормализация градиента параметров
-            grad_norm = np.linalg.norm(grad_parameters)
-            if grad_norm > 1.0:
-                grad_parameters = grad_parameters * (1.0 / grad_norm)
 
-            # Ограничение градиента свободного члена
-            if abs(grad_const) > 1.0:
-                grad_const = grad_const / abs(grad_const)
+            # # Нормализация градиента параметров
+            # grad_norm = np.linalg.norm(grad_parameters)
+            # if grad_norm > 1.0:
+            #     grad_parameters = grad_parameters * (1.0 / grad_norm)
+            max_norm = 5.0
+            grad_norm = np.linalg.norm(grad_parameters)
+            if grad_norm > max_norm:
+                grad_parameters *= (max_norm / grad_norm)
+
+            # # Ограничение градиента свободного члена
+            # if abs(grad_const) > 1.0:
+            #     grad_const = grad_const / abs(grad_const)
 
             for param in self.parameters.index:
                 if param == "const":
@@ -192,9 +224,12 @@ class BackTrace:
                 self.history.append(row)
 
             # stop
-            if (self.parameters - prev_parameters).abs().sum() < 1e-4:
-                print("Вышли, потому что параметры не меняются")
-                break
+            # if (self.parameters - prev_parameters).abs().sum() < 1e-4:
+            #     if self.cnt_parameters_repeat == 5:
+            #         print("Вышли, потому что параметры не меняются")
+            #         break
+            #     else:
+            #         self.cnt_parameters_repeat += 1
 
             if self._cnt_MSE() < 1e-6:
                 print("Вышли, потому что ошибка наименьшая")
@@ -203,9 +238,9 @@ class BackTrace:
             if np.linalg.norm(grad_parameters) < 1e-4:
                 break
 
-            if abs(prev_MSE - self._cnt_MSE()) < epsilon:
-                print("Вышли, потому что ошибка не меняется")
-                break
+            # if abs(prev_MSE - self._cnt_MSE()) < epsilon:
+            #     print("Вышли, потому что ошибка не меняется")
+            #     break
 
             prev_parameters = self.parameters.copy()
             prev_MSE = self._cnt_MSE()
@@ -248,7 +283,32 @@ class BackTrace:
         self.print_history()
         end_time = time.time()
         self.print_results(start_time, end_time)
+
+        # beta_norm = self.parameters.drop('const')
+        # const_norm = self.parameters['const']
+        #
+        # # восстанавливаем "сырые" коэффициенты
+        # beta_raw = beta_norm * (y_std / x_stds)  # серии того же индекса, что и признаки
+        # const_raw = y_mean - (beta_raw * x_means).sum() + const_norm * y_std
+        #
+        # params_raw = pandas.Series({'const': const_raw, **beta_raw.to_dict()})
+
+        # trained — это self.parameters в шкале нормализованных данных
+        β_norm = self.parameters.drop('const')
+        c_norm = self.parameters['const']
+
+        # восстанавливаем ненормированные веса
+        β_raw = β_norm * (self.y_std / pandas.Series(self.x_stds))
+        c_raw = self.y_mean - (β_raw * pandas.Series(self.x_means)).sum() + c_norm * self.y_std
+
+        # собираем обратно в Series
+        raw_params = pandas.Series({'const': c_raw, **β_raw.to_dict()})
+
+        # затираем self.parameters и возвращаем их
+        self.parameters = raw_params
         return self.parameters
+
+        # return self.parameters
 
     def print_history(self):
         if self.full_output:
@@ -285,7 +345,6 @@ class BackTrace:
 
     def _cnt_sum_of_loose_function(self, batch: pandas.DataFrame) -> (pandas.Series, pandas.Series):
         all_mistakes = self._cnt_all_point_mistakes(batch)
-
 
         loss = (all_mistakes ** 2).mean()
         # Условие ранней остановки
