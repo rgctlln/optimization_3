@@ -25,7 +25,8 @@ def required_step_defined(method):
 
 class BackTrace:
 
-    def __init__(self, parameters: pandas.Series, points: pandas.DataFrame, batch_size: int = 1):
+    def __init__(self, parameters: pandas.Series, points: pandas.DataFrame, batch_size: int = 1, optimizer: str = 'sgd',
+                 momentum: float = 0.0):
         self.start_step = None
         self.step = None  # требуется вызов установки шага
 
@@ -45,6 +46,13 @@ class BackTrace:
         self.dichotomy_range = None
 
         self.batch_size = batch_size
+
+        # выбор оптимизатора: 'sgd' или 'momentum'
+        self.optimizer = optimizer
+        self.momentum = momentum
+        # инициализация скоростей для Momentum
+        self.velocity = pandas.Series(0., index=self.parameters.index)
+
         return
 
     def set_full_output(self):
@@ -113,16 +121,26 @@ class BackTrace:
         self.step = 1  # нужно что-то, чтобы не ругался декоратор
         return self
 
-    def set_golden_section_step(self, a=1e-5, b=1.0):
+    def set_regularization(self, reg: str, reg_param: float = 0.01, l1_ratio: float = 0.5):
         """
-        Устанавливаем метод выбора шага через метод золотого сечения
+        Устанавливаем регуляризацию: 'l1', 'l2' или 'elastic'.
+        :param reg: тип регуляризации
+        :param reg_param: параметр λ
+        :param l1_ratio: доля L1 в elastic
+        """
+        if reg not in (None, 'l1', 'l2', 'elastic'):
+            raise ValueError("Unknown regularization type")
+        self.regularization = reg
+        self.reg_param = reg_param
+        self.elastic_l1_ratio = l1_ratio
+        return self
 
-        :param a: левая граница отрезка
-        :param b: правая граница отрезка
-        """
-        self.choose_step_mode = "golden_section"
-        self.dichotomy_range = (a, b)  # используем то же поле
-        self.step = 1  # просто чтобы декоратор не ругался
+    def set_momentum(self, momentum: float):
+        """Включаем SGD с моментом"""
+        self.optimizer = 'momentum'
+        self.momentum = momentum
+        # сбрасываем скорости
+        self.velocity[:] = 0
         return self
 
     @required_step_defined
@@ -143,27 +161,11 @@ class BackTrace:
         if self.batch_size > len(self.points):
             raise Exception("The size of the batch exceeds the entire dataset. Reduce it!")
 
-        prev_parameters = self.parameters.copy()
-        prev_MSE = 99999999999
         self.prev_loss = float("inf")
         self.patience_counter = 0
         self.cnt_parameters_repeat = 0
-        # self.points = self.points.copy()
-        # for col in self.points.columns:
-        #     # if col != "DEPENDENT":
-        #     self.points[col] = (self.points[col] - self.points[col].mean()) / self.points[col].std()
 
         self.points = self.points.copy()
-
-        # # нормируем признаки
-        # for col in self.points.columns:
-        #     if col != "DEPENDENT":
-        #         self.points[col] = (self.points[col] - self.points[col].mean()) / self.points[col].std()
-        #
-        # # нормируем целевую переменную
-        # y_mean = self.points['DEPENDENT'].mean()
-        # y_std = self.points['DEPENDENT'].std()
-        # self.points['DEPENDENT'] = (self.points['DEPENDENT'] - y_mean) / y_std
 
         self.x_means = {}
         self.x_stds = {}
@@ -179,7 +181,6 @@ class BackTrace:
         self.y_std = self.points['DEPENDENT'].std()
         self.points['DEPENDENT'] = (self.points['DEPENDENT'] - self.y_mean) / self.y_std
 
-
         for i in range(0, 10000):
             self.cnt_iterations += 1
 
@@ -189,6 +190,16 @@ class BackTrace:
                 grad_const, grad_parameters = self._cnt_sum_of_loose_function(batch)
             except Exception as e:
                 break
+
+            # Добавляем регуляризацию к градиенту весов
+            w = self.parameters.drop('const')
+            if self.regularization == 'l2':
+                grad_parameters += self.reg_param * w
+            elif self.regularization == 'l1':
+                grad_parameters += self.reg_param * np.sign(w)
+            elif self.regularization == 'elastic':
+                grad_parameters += self.elastic_l1_ratio * self.reg_param * np.sign(w)
+                grad_parameters += (1 - self.elastic_l1_ratio) * self.reg_param * w
 
             # # Нормализация градиента параметров
             # grad_norm = np.linalg.norm(grad_parameters)
@@ -203,11 +214,22 @@ class BackTrace:
             # if abs(grad_const) > 1.0:
             #     grad_const = grad_const / abs(grad_const)
 
-            for param in self.parameters.index:
-                if param == "const":
-                    self.parameters[param] -= self.step * grad_const
-                else:
-                    self.parameters[param] -= self.step * grad_parameters[param]
+            # выбор метода обновления
+            if self.optimizer == 'momentum':
+                # обновление скорости
+                self.velocity['const'] = self.momentum * self.velocity['const'] + self.step * grad_const
+                for p in grad_parameters.index:
+                    self.velocity[p] = self.momentum * self.velocity[p] + self.step * grad_parameters[p]
+                # обновляем параметры
+                self.parameters['const'] -= self.velocity['const']
+                for p in grad_parameters.index:
+                    self.parameters[p] -= self.velocity[p]
+            else:
+                for param in self.parameters.index:
+                    if param == "const":
+                        self.parameters[param] -= self.step * grad_const
+                    else:
+                        self.parameters[param] -= self.step * grad_parameters[param]
 
             new_norma = grad_parameters.dot(grad_parameters) ** 0.5
             if self.full_output:
@@ -238,10 +260,6 @@ class BackTrace:
             if np.linalg.norm(grad_parameters) < 1e-4:
                 break
 
-            # if abs(prev_MSE - self._cnt_MSE()) < epsilon:
-            #     print("Вышли, потому что ошибка не меняется")
-            #     break
-
             prev_parameters = self.parameters.copy()
             prev_MSE = self._cnt_MSE()
             if self.choose_step_mode == "exponential_decay":
@@ -261,9 +279,8 @@ class BackTrace:
                 history_last_norma = -1
                 print("Мы обнаружили зацикливание")
                 if self.choose_step_mode == "constant":
-                    # self.print_history()
                     print(
-                        "\033[31m" 
+                        "\033[31m"
                         f"A short circuit has been detected, and the constant step mode does not allow changing the step. "
                         f"Run the method again, but reduce the step. Current step: {self.step}"
                         "\033[0m"
@@ -281,14 +298,12 @@ class BackTrace:
                         f"A short circuit has been detected")
 
         else:
-            # self.print_history()
             print(self.parameters)
             print(
-                "\033[31m"  
+                "\033[31m"
                 f"Protection has been activated. More than {self.cnt_iterations} iterations have been done."
                 "\033[0m"
             )
-
             # raise Exception(
             #     f"Protection has been activated. More than {self.cnt_iterations} iterations have been done.")
 
@@ -296,27 +311,15 @@ class BackTrace:
         end_time = time.time()
         self.print_results(start_time, end_time)
 
-        # beta_norm = self.parameters.drop('const')
-        # const_norm = self.parameters['const']
-        #
-        # # восстанавливаем "сырые" коэффициенты
-        # beta_raw = beta_norm * (y_std / x_stds)  # серии того же индекса, что и признаки
-        # const_raw = y_mean - (beta_raw * x_means).sum() + const_norm * y_std
-        #
-        # params_raw = pandas.Series({'const': const_raw, **beta_raw.to_dict()})
-
-        # trained — это self.parameters в шкале нормализованных данных
-        β_norm = self.parameters.drop('const')
+        ne_const_norm = self.parameters.drop('const')
         c_norm = self.parameters['const']
 
         # восстанавливаем ненормированные веса
-        β_raw = β_norm * (self.y_std / pandas.Series(self.x_stds))
-        c_raw = self.y_mean - (β_raw * pandas.Series(self.x_means)).sum() + c_norm * self.y_std
+        ne_const_unnorm = ne_const_norm * (self.y_std / pandas.Series(self.x_stds))
+        c_raw = self.y_mean - (ne_const_unnorm * pandas.Series(self.x_means)).sum() + c_norm * self.y_std
 
-        # собираем обратно в Series
-        raw_params = pandas.Series({'const': c_raw, **β_raw.to_dict()})
+        raw_params = pandas.Series({'const': c_raw, **ne_const_unnorm.to_dict()})
 
-        # затираем self.parameters и возвращаем их
         self.parameters = raw_params
         return self.parameters
 
